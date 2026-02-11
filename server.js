@@ -97,12 +97,18 @@ passport.deserializeUser(async (id, done) => {
 });
 
 // --- EMAIL TRANSPORTER SETUP ---
+// --- UPDATED EMAIL TRANSPORTER FOR RENDER (IPv4 Fix) ---
 const transporter = nodemailer.createTransport({
-  service: 'gmail',
+  host: "smtp.gmail.com",
+  port: 465,
+  secure: true, // Use SSL
   auth: {
     user: process.env.EMAIL_USER,
     pass: process.env.EMAIL_PASS
-  }
+  },
+  // This is the CRITICAL part for Render
+  // It forces the connection to use IPv4 instead of IPv6
+  connectionTimeout: 10000, 
 });
 
 // --- BUDGET OVERRUN CHECKER (Helper Function) ---

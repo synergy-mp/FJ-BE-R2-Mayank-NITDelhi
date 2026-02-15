@@ -1,6 +1,21 @@
-node_modules
-# Keep environment variables out of version control
-.env
+# Dependencies
+node_modules/
 
+# Environment variables (DO NOT REMOVE THIS)
+.env
+*.env
+
+# Prisma generated files
 /generated/prisma
-uploads
+/prisma/migrations/
+
+# File uploads (Receipts)
+uploads/
+
+# Operating System files
+.DS_Store
+Thumbs.db
+
+# IDE settings
+.vscode/
+.idea/

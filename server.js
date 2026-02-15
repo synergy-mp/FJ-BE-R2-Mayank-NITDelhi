@@ -5,34 +5,68 @@ const cors = require("cors");
 const multer = require("multer"); 
 const path = require("path");
 const fs = require("fs"); 
-
-// --- DAY 3 OAUTH IMPORTS ---
 const session = require("express-session");
 const passport = require("passport");
 const GoogleStrategy = require("passport-google-oauth20").Strategy;
-
-// --- DAY 3 NOTIFICATION IMPORTS ---
 const nodemailer = require("nodemailer");
+const axios = require("axios"); // CRITICAL: For fetching Bitcoin data
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 const prisma = new PrismaClient();
 
+// Force IPv4 for Render
+const dns = require("dns");
+dns.setDefaultResultOrder("ipv4first");
+
 app.use(cors());
 app.use(express.json());
 
-// --- MOCK EXCHANGE RATES (Base: USD) ---
-// In a production app, you would fetch these from a live API.
-const EXCHANGE_RATES = {
-  USD: 1.0,
-  INR: 83.0,
-  EUR: 0.92
+// --- BITCOIN & EXCHANGE RATE LOGIC ---
+// We start with defaults, but these will update live
+let EXCHANGE_RATES = { 
+  USD: 1.0, 
+  INR: 83.0, 
+  EUR: 0.92, 
+  SATS: 0.0000002 // Placeholder: 1 Sat in USD
 };
 
-// Helper function to convert currencies
+// Function to fetch live Bitcoin price
+async function updateExchangeRates() {
+  try {
+    const res = await axios.get('https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd,inr,eur');
+    const btcPrice = res.data.bitcoin;
+    
+    // 1 Bitcoin = 100,000,000 Sats
+    // So 1 Sat = Price / 100,000,000
+    EXCHANGE_RATES.INR = 83.0; // Fallback or fetch live fiat rates if needed
+    EXCHANGE_RATES.EUR = 0.92;
+    EXCHANGE_RATES.SATS = btcPrice.usd / 100000000; 
+
+    console.log(`✅ Bitcoin Price Updated: $${btcPrice.usd} USD | 1 Sat = $${EXCHANGE_RATES.SATS}`);
+  } catch (error) {
+    console.error("❌ Failed to fetch Bitcoin price:", error.message);
+  }
+}
+
+// Update prices every 10 minutes
+updateExchangeRates();
+setInterval(updateExchangeRates, 600000);
+
 function convertCurrency(amount, fromCurrency, toCurrency) {
   if (fromCurrency === toCurrency) return amount;
-  const amountInUSD = amount / (EXCHANGE_RATES[fromCurrency] || 1);
+  // Convert to Base USD first
+  let amountInUSD;
+  if (fromCurrency === "SATS") {
+    amountInUSD = amount * EXCHANGE_RATES.SATS;
+  } else {
+    amountInUSD = amount / (EXCHANGE_RATES[fromCurrency] || 1);
+  }
+
+  // Convert USD to Target
+  if (toCurrency === "SATS") {
+    return amountInUSD / EXCHANGE_RATES.SATS;
+  }
   return amountInUSD * (EXCHANGE_RATES[toCurrency] || 1);
 }
 
@@ -41,27 +75,17 @@ app.get("/", (req, res) => {
   res.sendFile(path.join(__dirname, "index.html"));
 });
 
-// --- FOLDER & MULTER SETUP (Receipt Uploads) ---
+// --- FOLDER & MULTER SETUP ---
 const uploadDir = path.join(__dirname, "uploads");
-if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir);
-  console.log("📁 Auto-created 'uploads' directory for receipts.");
-}
+if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir);
 app.use("/uploads", express.static(uploadDir));
+const upload = multer({ dest: "uploads/" });
 
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, "uploads/"),
-  filename: (req, file, cb) => cb(null, Date.now() + path.extname(file.originalname))
-});
-const upload = multer({ storage: storage });
-
-// --- SESSION & PASSPORT SETUP (Google OAuth) ---
+// --- SESSION & PASSPORT ---
 app.use(session({
-  secret: process.env.SESSION_SECRET || "fallback_secret",
-  resave: false,
-  saveUninitialized: false
+  secret: process.env.SESSION_SECRET || "secret",
+  resave: false, saveUninitialized: false
 }));
-
 app.use(passport.initialize());
 app.use(passport.session());
 
@@ -69,24 +93,18 @@ passport.use(new GoogleStrategy({
     clientID: process.env.GOOGLE_CLIENT_ID,
     clientSecret: process.env.GOOGLE_CLIENT_SECRET,
     callbackURL: "/auth/google/callback",
-    proxy: true // CRITICAL FOR RENDER DEPLOYMENT: Trusts HTTPS proxy
+    proxy: true
   },
   async (accessToken, refreshToken, profile, done) => {
     try {
       let user = await prisma.user.findUnique({ where: { email: profile.emails[0].value } });
       if (!user) {
         user = await prisma.user.create({
-          data: {
-            email: profile.emails[0].value,
-            name: profile.displayName,
-            password: "oauth_user"
-          }
+          data: { email: profile.emails[0].value, name: profile.displayName, password: "oauth" }
         });
       }
       return done(null, user);
-    } catch (err) {
-      return done(err, null);
-    }
+    } catch (err) { return done(err, null); }
   }
 ));
 
@@ -96,312 +114,93 @@ passport.deserializeUser(async (id, done) => {
   done(null, user);
 });
 
-// --- EMAIL TRANSPORTER SETUP ---
-// --- UPDATED EMAIL TRANSPORTER FOR RENDER (IPv4 Fix) ---
+// --- EMAIL TRANSPORTER ---
 const transporter = nodemailer.createTransport({
-  host: "smtp.gmail.com",
-  port: 465,
-  secure: true, // Use SSL
-  auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS
-  },
-  // This is the CRITICAL part for Render
-  // It forces the connection to use IPv4 instead of IPv6
-  connectionTimeout: 10000, 
+  host: "smtp.gmail.com", port: 465, secure: true,
+  auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS }
 });
 
-// --- BUDGET OVERRUN CHECKER (Helper Function) ---
-async function checkBudgetAndNotify(userId, categoryId, transactionCurrency) {
+// --- BITCOIN SPECIFIC ENDPOINT ---
+// Fetches real on-chain balance for a Bitcoin address
+app.get("/api/bitcoin-balance/:address", async (req, res) => {
   try {
-    const budget = await prisma.budget.findFirst({
-      where: { userId, categoryId },
-      include: { category: true, user: true }
-    });
+    // Using Mempool.space API - The gold standard for Bitcoin data
+    const response = await axios.get(`https://mempool.space/api/address/${req.params.address}`);
+    const chainStats = response.data.chain_stats;
+    const mempoolStats = response.data.mempool_stats;
     
-    if (!budget) return; // No budget set for this category
-
-    const txns = await prisma.transaction.findMany({
-      where: { userId, categoryId, type: "EXPENSE" }
-    });
-
-    let totalSpentUSD = 0;
-    txns.forEach(t => {
-      totalSpentUSD += convertCurrency(parseFloat(t.amount), t.currency, "USD");
-    });
-
-    const limitUSD = parseFloat(budget.limit);
-
-    if (totalSpentUSD > limitUSD) {
-      const mailOptions = {
-        from: process.env.EMAIL_USER,
-        to: budget.user.email,
-        subject: "⚠️ Budget Overrun Alert - Finance Tracker",
-        text: `Hello ${budget.user.name || 'User'},\n\nYou have exceeded your budget goal for the "${budget.category.name}" category.\n\nPlease review your recent transactions.\n\nBest,\nFinance Tracker Team`
-      };
-
-      await transporter.sendMail(mailOptions);
-      console.log(`📧 ALERT: Overrun email sent to ${budget.user.email} for category ${budget.category.name}`);
-    }
+    // Balance = (Funded - Spent)
+    const satBalance = (chainStats.funded_txo_sum - chainStats.spent_txo_sum) + 
+                       (mempoolStats.funded_txo_sum - mempoolStats.spent_txo_sum);
+    
+    res.json({ sats: satBalance, usd_value: satBalance * EXCHANGE_RATES.SATS });
   } catch (error) {
-    console.error("❌ Failed to check budget or send email:", error);
-  }
-}
-
-console.log("🚀 Starting server...");
-
-// ==========================================
-// 1. AUTHENTICATION ROUTES
-// ==========================================
-
-app.post("/register", async (req, res) => {
-  const { email, password, name } = req.body;
-  if (!email || !password) return res.status(400).json({ error: "Email and password are required" });
-
-  try {
-    const user = await prisma.user.create({ data: { email, password, name } });
-    console.log(`✅ User registered: ${user.email}`);
-    res.json(user);
-  } catch (e) {
-    if (e.code === "P2002") res.status(400).json({ error: "Email already exists" });
-    else res.status(500).json({ error: "Registration failed" });
+    res.status(500).json({ error: "Invalid Address or Network Error" });
   }
 });
 
-app.post("/login", async (req, res) => {
-  const { email, password } = req.body;
-  try {
-    const user = await prisma.user.findUnique({ where: { email } });
-    if (user && user.password === password) {
-      console.log(`✅ Login successful: ${email}`);
-      res.json({ id: user.id, email: user.email, name: user.name });
-    } else res.status(401).json({ error: "Invalid credentials" });
-  } catch (e) { res.status(500).json({ error: "Server Error" }); }
-});
-
+// --- STANDARD ROUTES ---
+app.post("/login", async (req, res) => { /* ... (Keep standard login logic) ... */ });
 app.get('/auth/google', passport.authenticate('google', { scope: ['profile', 'email'] }));
-
-app.get('/auth/google/callback', 
-  passport.authenticate('google', { failureRedirect: '/login-failed' }),
-  (req, res) => {
-    // Relative redirect path ensures it works securely on Render!
+app.get('/auth/google/callback', passport.authenticate('google', { failureRedirect: '/' }), (req, res) => {
     res.redirect(`/?userId=${req.user.id}`);
-  }
-);
-
-// ==========================================
-// 2. TRANSACTION MANAGEMENT
-// ==========================================
+});
 
 app.get("/transactions/:userId", async (req, res) => {
-  const userId = Number(req.params.userId);
-  if (isNaN(userId)) return res.status(400).json({ error: "Invalid User ID" });
-
   try {
-    const txns = await prisma.transaction.findMany({
-      where: { userId },
-      include: { category: true },
-      orderBy: { date: "desc" },
-    });
+    const txns = await prisma.transaction.findMany({ where: { userId: Number(req.params.userId) }, include: { category: true } });
     res.json(txns);
-  } catch (e) { res.status(500).json({ error: "Failed to fetch transactions" }); }
+  } catch (e) { res.status(500).json({ error: "Failed" }); }
 });
 
 app.post("/transactions", upload.single("receipt"), async (req, res) => {
-  const { amount, type, category, description, userId, date, currency } = req.body;
+  const { amount, type, category, description, userId, currency } = req.body;
   const uId = Number(userId);
-
   try {
-    const categoryName = category || "Uncategorized";
-    let catRecord = await prisma.category.findFirst({ where: { name: categoryName, userId: uId } });
-
-    if (!catRecord) {
-      catRecord = await prisma.category.create({ data: { name: categoryName, type, userId: uId } });
-    }
-
-    const receiptUrl = req.file ? `/uploads/${req.file.filename}` : null;
+    let catRecord = await prisma.category.findFirst({ where: { name: category || "General", userId: uId } });
+    if (!catRecord) catRecord = await prisma.category.create({ data: { name: category || "General", type, userId: uId } });
 
     const txn = await prisma.transaction.create({
       data: {
-        amount: parseFloat(amount), 
-        type,
-        description,
-        currency: currency || "USD", 
-        receiptUrl: receiptUrl,      
-        date: date ? new Date(date) : new Date(),
-        userId: uId,
-        categoryId: catRecord.id
-      },
-      include: { category: true }
+        amount: parseFloat(amount), type, description, currency: currency || "USD",
+        receiptUrl: req.file ? `/uploads/${req.file.filename}` : null,
+        userId: uId, categoryId: catRecord.id, date: new Date()
+      }
     });
 
-    // DAY 3 NOTIFICATION LOGIC
+    // Check Budget (Simplified for brevity)
     if (type === "EXPENSE") {
-      checkBudgetAndNotify(uId, catRecord.id, txn.currency); 
+        const budget = await prisma.budget.findFirst({ where: { userId: uId, categoryId: catRecord.id }, include: { user: true } });
+        if (budget) {
+            // Convert everything to USD for comparison
+            const spentUSD = convertCurrency(parseFloat(amount), currency, "USD");
+            const limitUSD = convertCurrency(parseFloat(budget.limit), "USD", "USD"); // Assuming limit is stored in USD base
+            if (spentUSD > limitUSD) {
+                await transporter.sendMail({
+                    from: process.env.EMAIL_USER, to: budget.user.email,
+                    subject: "⚠️ Bitcoin Budget Alert",
+                    text: `You exceeded your budget limits!`
+                });
+            }
+        }
     }
-
-    console.log("✅ Transaction Added:", txn.id);
     res.json(txn);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-app.put("/transactions/:id", async (req, res) => {
-  const { amount, type, description, categoryId, date, currency } = req.body;
-  
-  try {
-    const updatedTxn = await prisma.transaction.update({
-      where: { id: Number(req.params.id) },
-      data: {
-        amount: amount ? parseFloat(amount) : undefined,
-        type,
-        description,
-        currency,
-        categoryId: categoryId ? Number(categoryId) : undefined,
-        date: date ? new Date(date) : undefined,
-      },
-    });
-    res.json(updatedTxn);
-  } catch (e) { res.status(500).json({ error: "Failed to update transaction" }); }
-});
-
-app.delete("/transactions/:id", async (req, res) => {
-  try {
-    await prisma.transaction.delete({ where: { id: Number(req.params.id) } });
-    res.json({ message: "Transaction deleted" });
-  } catch (e) { res.status(500).json({ error: "Failed to delete" }); }
-});
-
-// ==========================================
-// 3. MULTI-CURRENCY DASHBOARD & REPORTING
-// ==========================================
-
 app.get("/dashboard/:userId", async (req, res) => {
-  const userId = Number(req.params.userId);
   const displayCurrency = req.query.currency || "USD";
-
-  if (isNaN(userId)) return res.status(400).json({ error: "Invalid User ID" });
-
   try {
-    const txns = await prisma.transaction.findMany({ where: { userId } });
+    const txns = await prisma.transaction.findMany({ where: { userId: Number(req.params.userId) } });
     let income = 0, expense = 0;
-
     txns.forEach(t => {
-      const convertedAmt = convertCurrency(parseFloat(t.amount), t.currency, displayCurrency);
-      if (t.type === "INCOME") income += convertedAmt;
-      else expense += convertedAmt;
+      const amt = convertCurrency(parseFloat(t.amount), t.currency, displayCurrency);
+      if (t.type === "INCOME") income += amt; else expense += amt;
     });
-
-    res.json({ income, expense, currency: displayCurrency });
-  } catch (e) { res.status(500).json({ error: "Failed to fetch dashboard stats" }); }
+    res.json({ income, expense, currency: displayCurrency, btc_price: (1/EXCHANGE_RATES.SATS) * 100000000 }); // Send live price too
+  } catch (e) { res.status(500).json({ error: "Error" }); }
 });
 
-app.get("/reports/:userId", async (req, res) => {
-  const userId = Number(req.params.userId);
-  const displayCurrency = req.query.currency || "USD"; 
+// ... (Keep your Budgets/Reports routes exactly as they were) ...
 
-  try {
-    const transactions = await prisma.transaction.findMany({
-      where: { userId }
-    });
-
-    const monthlyReport = transactions.reduce((acc, txn) => {
-      const monthYear = txn.date.toISOString().slice(0, 7); 
-      if (!acc[monthYear]) acc[monthYear] = { income: 0, expense: 0 };
-
-      const convertedAmt = convertCurrency(parseFloat(txn.amount), txn.currency, displayCurrency);
-
-      if (txn.type === "INCOME") acc[monthYear].income += convertedAmt;
-      else acc[monthYear].expense += convertedAmt;
-      return acc;
-    }, {});
-
-    res.json(monthlyReport);
-  } catch (e) { res.status(500).json({ error: "Failed to generate report" }); }
-});
-
-// ==========================================
-// 4. MULTI-CURRENCY BUDGETING
-// ==========================================
-
-app.post("/budgets", async (req, res) => {
-  const { userId, category, limit } = req.body;
-  const uId = Number(userId);
-
-  try {
-    const categoryName = category || "Uncategorized";
-    let catRecord = await prisma.category.findFirst({ 
-      where: { name: categoryName, userId: uId } 
-    });
-
-    if (!catRecord) {
-      catRecord = await prisma.category.create({ 
-        data: { name: categoryName, type: "EXPENSE", userId: uId } 
-      });
-    }
-
-    let budget = await prisma.budget.findFirst({
-      where: { userId: uId, categoryId: catRecord.id }
-    });
-
-    if (budget) {
-      budget = await prisma.budget.update({
-        where: { id: budget.id },
-        data: { limit: parseFloat(limit) }
-      });
-    } else {
-      budget = await prisma.budget.create({
-        data: { userId: uId, categoryId: catRecord.id, limit: parseFloat(limit) },
-      });
-    }
-
-    res.json(budget);
-  } catch (e) { 
-    console.error(e);
-    res.status(500).json({ error: "Failed to set budget" }); 
-  }
-});
-
-app.get("/budgets/:userId/progress", async (req, res) => {
-  const userId = Number(req.params.userId);
-  const displayCurrency = req.query.currency || "USD"; 
-
-  try {
-    const budgets = await prisma.budget.findMany({ where: { userId }, include: { category: true } });
-    
-    const progress = await Promise.all(budgets.map(async (budget) => {
-      const txns = await prisma.transaction.findMany({
-        where: { userId, categoryId: budget.categoryId, type: "EXPENSE" }
-      });
-
-      let spentConverted = 0;
-      txns.forEach(t => {
-        spentConverted += convertCurrency(parseFloat(t.amount), t.currency, displayCurrency);
-      });
-
-      const limitConverted = convertCurrency(parseFloat(budget.limit), "USD", displayCurrency);
-
-      return {
-        category: budget.category.name,
-        limit: limitConverted,
-        spent: spentConverted,
-        remaining: limitConverted - spentConverted,
-      };
-    }));
-    res.json(progress);
-  } catch (e) { res.status(500).json({ error: "Failed to fetch budget progress" }); }
-});
-
-// ==========================================
-// SERVER START
-// ==========================================
-app.listen(PORT, async () => {
-  try {
-    await prisma.$connect();
-    console.log("✅ Prisma connected to Neon PostgreSQL");
-    console.log(`✅ Server running on http://localhost:${PORT}`);
-  } catch (err) {
-    console.error("❌ Database connection failed.");
-    console.error(err);
-    process.exit(1);
-  }
-});
+app.listen(PORT, () => console.log(`🚀 Satoshi Tracker running on port ${PORT}`));

@@ -15,57 +15,74 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const prisma = new PrismaClient();
 
-// Force IPv4 for Render (Fixes email errors)
+// Force IPv4 for Render (Crucial for email & outgoing API requests)
 const dns = require("dns");
 dns.setDefaultResultOrder("ipv4first");
 
 app.use(cors());
 app.use(express.json());
 
-// --- BITCOIN PRICE LOGIC ---
+// --- ROBUST BITCOIN PRICE LOGIC ---
 let EXCHANGE_RATES = { 
   USD: 1.0, 
   INR: 83.0, 
   EUR: 0.92, 
-  SATS: 0.0000002 // Default fallback
+  SATS: 0.0000002 
 };
 
-let CURRENT_BTC_PRICE = 20000; // Default fallback
+// Default close to real market price to avoid scaring users if APIs fail
+let CURRENT_BTC_PRICE = 96000; 
 
 async function updateExchangeRates() {
   try {
-    const res = await axios.get('https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd,inr,eur');
-    const btcPrice = res.data.bitcoin;
+    // Attempt 1: CoinGecko
+    console.log("⏳ Fetching BTC Price from CoinGecko...");
+    const res = await axios.get('https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd,inr,eur', { timeout: 5000 });
     
+    const btcPrice = res.data.bitcoin;
     CURRENT_BTC_PRICE = btcPrice.usd;
-    EXCHANGE_RATES.INR = 83.0; // In a real app, fetch this too
-    EXCHANGE_RATES.EUR = 0.92;
+    EXCHANGE_RATES.INR = btcPrice.inr / btcPrice.usd * 83; // Approx adjustment
+    EXCHANGE_RATES.EUR = btcPrice.eur / btcPrice.usd * 0.92;
     EXCHANGE_RATES.SATS = btcPrice.usd / 100000000; 
+    console.log(`✅ Price Updated (CoinGecko): $${CURRENT_BTC_PRICE}`);
 
-    console.log(`✅ Bitcoin Price Updated: $${CURRENT_BTC_PRICE}`);
   } catch (error) {
-    console.error("❌ Failed to fetch Bitcoin price:", error.message);
+    console.warn("⚠️ CoinGecko failed, trying CoinDesk fallback...");
+    try {
+      // Attempt 2: CoinDesk (Fallback)
+      const res = await axios.get('https://api.coindesk.com/v1/bpi/currentprice.json', { timeout: 5000 });
+      CURRENT_BTC_PRICE = res.data.bpi.USD.rate_float;
+      EXCHANGE_RATES.SATS = CURRENT_BTC_PRICE / 100000000;
+      console.log(`✅ Price Updated (CoinDesk): $${CURRENT_BTC_PRICE}`);
+    } catch (err2) {
+      console.error("❌ All Price APIs failed. Using last known price.");
+    }
   }
 }
 
-// Update immediately and then every 10 minutes
+// Update immediately and then every 2 minutes
 updateExchangeRates();
-setInterval(updateExchangeRates, 600000);
+setInterval(updateExchangeRates, 120000); 
 
 function convertCurrency(amount, fromCurrency, toCurrency) {
   if (fromCurrency === toCurrency) return amount;
   
   let amountInUSD;
+  // Convert Input to USD
   if (fromCurrency === "SATS") {
     amountInUSD = amount * EXCHANGE_RATES.SATS;
   } else {
-    amountInUSD = amount / (EXCHANGE_RATES[fromCurrency] || 1);
+    // Basic fiat conversion
+    if(fromCurrency === "INR") amountInUSD = amount / 83.0; // Simple hardcoded fallback for fiat-to-fiat
+    else if(fromCurrency === "EUR") amountInUSD = amount / 0.92;
+    else amountInUSD = amount; 
   }
 
-  if (toCurrency === "SATS") {
-    return amountInUSD / EXCHANGE_RATES.SATS;
-  }
-  return amountInUSD * (EXCHANGE_RATES[toCurrency] || 1);
+  // Convert USD to Target
+  if (toCurrency === "SATS") return amountInUSD / EXCHANGE_RATES.SATS;
+  if (toCurrency === "INR") return amountInUSD * 83.0;
+  if (toCurrency === "EUR") return amountInUSD * 0.92;
+  return amountInUSD;
 }
 
 // --- SERVE FRONTEND ---
@@ -115,7 +132,7 @@ const transporter = nodemailer.createTransport({
   auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS }
 });
 
-// --- NEW PUBLIC TICKER ENDPOINT ---
+// --- PUBLIC TICKER ENDPOINT ---
 app.get("/api/ticker", (req, res) => {
     res.json({ price: CURRENT_BTC_PRICE });
 });
@@ -189,6 +206,33 @@ app.get("/dashboard/:userId", async (req, res) => {
   } catch (e) { res.status(500).json({ error: "Error" }); }
 });
 
-// ... Keep existing budgets/reports endpoints ...
+// ... Keep existing budgets/reports endpoints (unchanged) ...
+app.post("/budgets", async (req, res) => {
+  const { userId, category, limit } = req.body;
+  try {
+    let cat = await prisma.category.findFirst({ where: { name: category, userId: Number(userId) } });
+    if (!cat) cat = await prisma.category.create({ data: { name: category, type: "EXPENSE", userId: Number(userId) } });
+    const budget = await prisma.budget.upsert({
+      where: { id: (await prisma.budget.findFirst({ where: { userId: Number(userId), categoryId: cat.id } }))?.id || -1 },
+      update: { limit: parseFloat(limit) },
+      create: { userId: Number(userId), categoryId: cat.id, limit: parseFloat(limit) }
+    });
+    res.json(budget);
+  } catch (e) { res.status(500).json({ error: "Failed" }); }
+});
+
+app.get("/budgets/:userId/progress", async (req, res) => {
+  const displayCurrency = req.query.currency || "USD";
+  try {
+    const budgets = await prisma.budget.findMany({ where: { userId: Number(req.params.userId) }, include: { category: true } });
+    const progress = await Promise.all(budgets.map(async (b) => {
+      const txns = await prisma.transaction.findMany({ where: { userId: b.userId, categoryId: b.categoryId, type: "EXPENSE" } });
+      let spent = 0;
+      txns.forEach(t => { spent += convertCurrency(parseFloat(t.amount), t.currency, displayCurrency); });
+      return { category: b.category.name, limit: convertCurrency(parseFloat(b.limit), "USD", displayCurrency), spent };
+    }));
+    res.json(progress);
+  } catch (e) { res.status(500).json({ error: "Failed" }); }
+});
 
 app.listen(PORT, () => console.log(`🚀 Satoshi Tracker running on port ${PORT}`));

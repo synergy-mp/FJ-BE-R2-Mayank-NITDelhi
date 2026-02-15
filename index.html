@@ -13,7 +13,6 @@
         button { background: #007bff; color: white; border: none; font-weight: bold; cursor: pointer; }
         button:hover { background: #0056b3; }
         .card { padding: 10px; border-bottom: 1px solid #eee; display: flex; justify-content: space-between; }
-        .income { color: green; } .expense { color: red; }
     </style>
 </head>
 <body>
@@ -41,27 +40,24 @@
             <div class="grid">
                 <div>
                     <h3>📝 Add Transaction</h3>
-                    <input type="text" id="desc" placeholder="Description (e.g. Bought the Dip)">
+                    <input type="text" id="desc" placeholder="Description">
                     <div style="display:flex; gap:10px;">
                         <input type="number" id="amt" placeholder="Amount">
                         <select id="curr">
-                            <option value="SATS">Sats (Satoshis)</option>
+                            <option value="SATS">Sats</option>
                             <option value="USD">USD</option>
                             <option value="INR">INR</option>
                         </select>
                     </div>
-                    <select id="type"><option value="INCOME">Income / Deposit</option><option value="EXPENSE">Expense / Withdrawal</option></select>
-                    <input type="text" id="cat" placeholder="Category (e.g. HODL)">
+                    <select id="type"><option value="INCOME">Income</option><option value="EXPENSE">Expense</option></select>
+                    <input type="text" id="cat" placeholder="Category">
                     <button onclick="addTxn()">Add Transaction</button>
                 </div>
-
                 <div>
                     <h3>👀 Watch Bitcoin Address</h3>
                     <input type="text" id="watchAddr" placeholder="Paste BTC Address (bc1q...)">
-                    <button onclick="checkAddress()" style="background:#f7931a;">Check On-Chain Balance</button>
+                    <button onclick="checkAddress()" style="background:#f7931a;">Check Balance</button>
                     <div id="addrResult" style="margin-top:10px; font-weight:bold;"></div>
-                    
-                    <h3 style="margin-top:30px;">📜 Recent Activity</h3>
                     <div id="txns"></div>
                 </div>
             </div>
@@ -74,6 +70,10 @@
         let myChart = null;
 
         window.onload = () => {
+            // 1. Fetch Price Immediately (Even if not logged in)
+            fetchTicker();
+
+            // 2. Check Login Status
             const params = new URLSearchParams(window.location.search);
             if (params.get('userId')) { 
                 userId = params.get('userId'); 
@@ -83,21 +83,29 @@
             }
         };
 
+        async function fetchTicker() {
+            try {
+                const res = await fetch('/api/ticker');
+                const data = await res.json();
+                document.getElementById('btc-ticker').innerText = `🔥 Live Bitcoin Price: $${Math.floor(data.price).toLocaleString()} USD`;
+            } catch (e) {
+                console.log("Ticker waiting for server...");
+            }
+        }
+
         async function loadData() {
             const curr = document.getElementById('globalCurrency').value;
-            // Fetch Dashboard Data (includes live BTC price)
             const res = await fetch(`/dashboard/${userId}?currency=${curr}`);
             const data = await res.json();
             
-            // Update Ticker
-            const btcPrice = data.btc_price || 0;
-            document.getElementById('btc-ticker').innerText = `🔥 Live Bitcoin Price: $${Math.floor(btcPrice).toLocaleString()} USD`;
+            // Also update ticker here to keep it fresh
+            if(data.btc_price) {
+                document.getElementById('btc-ticker').innerText = `🔥 Live Bitcoin Price: $${Math.floor(data.btc_price).toLocaleString()} USD`;
+            }
 
-            // Update Stats
             const symbol = curr === 'SATS' ? '⚡' : (curr === 'USD' ? '$' : '₹');
             document.getElementById('stats').innerText = `Net Worth: ${symbol}${(data.income - data.expense).toLocaleString()}`;
 
-            // Chart
             const ctx = document.getElementById('financeChart').getContext('2d');
             if(myChart) myChart.destroy();
             myChart = new Chart(ctx, { 
@@ -105,7 +113,6 @@
                 data: { labels: ['Income', 'Expense'], datasets: [{ data: [data.income, data.expense], backgroundColor: ['#28a745', '#dc3545'] }] } 
             });
 
-            // Transactions
             const txRes = await fetch(`/transactions/${userId}`);
             const txns = await txRes.json();
             document.getElementById('txns').innerHTML = txns.slice(0, 5).map(t => 
@@ -122,21 +129,15 @@
             loadData();
         }
 
-        // NEW: Check Real Bitcoin Address
         async function checkAddress() {
             const addr = document.getElementById('watchAddr').value;
-            if(!addr) return alert("Enter an address!");
-            document.getElementById('addrResult').innerText = "Scanning Mempool...";
-            
+            if(!addr) return alert("Enter address");
+            document.getElementById('addrResult').innerText = "Scanning...";
             try {
                 const res = await fetch(`/api/bitcoin-balance/${addr}`);
                 const data = await res.json();
-                document.getElementById('addrResult').innerHTML = 
-                    `Address Balance: <span style="color:#f7931a;">${data.sats.toLocaleString()} Sats</span><br>
-                     (≈ $${data.usd_value.toFixed(2)} USD)`;
-            } catch (err) {
-                document.getElementById('addrResult').innerText = "Address not found or empty.";
-            }
+                document.getElementById('addrResult').innerHTML = `Balance: ${data.sats.toLocaleString()} Sats (≈$${data.usd_value.toFixed(2)})`;
+            } catch (err) { document.getElementById('addrResult').innerText = "Address not found"; }
         }
     </script>
 </body>

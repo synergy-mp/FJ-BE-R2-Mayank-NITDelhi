@@ -1,106 +1,86 @@
-💰 Personal Finance Tracker
-A full-stack web application designed to help users track their income and expenses, set budget goals, and visualize their financial health. This project features secure authentication, multi-currency support, automated email alerts for budget overruns, and receipt image uploads.
+⚡ SatoshiTrack: Bitcoin Portfolio & Budget Manager
+A full-stack financial tool designed for the Bitcoin standard.
+
+SatoshiTrack is not just a finance tracker; it is a Bitcoin-native portfolio manager that allows users to track their net worth in Satoshis (sats), audit real-time on-chain balances, and set budget alerts based on live market data.
+
+Built with Node.js, PostgreSQL, and Prisma, this project demonstrates integration with the Bitcoin ecosystem via real-time blockchain APIs.
 
 🚀 Live Demo
-https://fj-be-r2-mayank-nitdelhi.onrender.com
+[Insert Your Render Link Here]
+(Note: Please allow ~30 seconds for the initial load as the free instance spins up.)
 
-✨ Key Features
-Secure Authentication: Local email/password login alongside Google OAuth 2.0 integration using Passport.js.
+₿ Summer of Bitcoin Features
+Designed specifically to demonstrate competency with Bitcoin data structures and APIs.
+⚡ Live Sats Conversion: The application fetches the real-time Bitcoin price via the CoinGecko API and dynamically converts all fiat entries (USD, INR, EUR) into Satoshis.
 
-Transaction Management: Add, edit, and delete income and expenses. Categorize transactions for better tracking.
+⛓️ On-Chain Audit (Watch-Only Wallet): Users can paste any public Bitcoin address (e.g., bc1q...). The app queries the Mempool.space API to verify the address's confirmed on-chain balance and integrates it into the user's total net worth.
+📉 Sats-Denominated Budgeting: Budget goals can be set in fiat, but the tracking and visualizations reflect the user's standing in the Bitcoin economy.
 
-Multi-Currency Support: Seamlessly switch dashboard views between USD, INR, and EUR with real-time exchange rate conversions.
-
-Smart Budgeting & Alerts: Set category-specific budget limits. The system automatically sends an email notification (via Nodemailer) the moment an expense pushes you over your budget.
-
-Visual Analytics: Interactive bar and line charts built with Chart.js to visualize net savings and monthly spending trends.
-
-Receipt Uploads: Attach images or PDF receipts to transactions using Multer.
-
-Data Export: Download monthly financial reports as .csv files for external use.
+✨ Standard Features
+🔐 Secure Authentication: Google OAuth 2.0 implementation (Passport.js) for secure, password-less login.
+📧 Automated Budget Alerts: Uses Nodemailer to send instant email notifications when spending exceeds defined limits.
+📊 Visual Analytics: Interactive Chart.js dashboards to visualize Income vs. Expenses.
+🧾 Receipt Management: Image upload functionality (Multer) to attach proof-of-payment to transactions.
+🌍 Multi-Currency Support: Seamless toggling between USD, INR, EUR, and SATS.
 
 🛠️ Tech Stack
-Frontend:
-
-HTML5, CSS3, Vanilla JavaScript
-
-Chart.js (Data Visualization)
-
-Backend:
-
-Node.js & Express.js
-
-Prisma ORM
-
-Passport.js (Google OAuth)
-
-Nodemailer (Email Alerts)
-
-Multer (File Uploads)
-
-Database & Deployment:
-
-PostgreSQL (Hosted on Neon)
-
-Render (Web Service Hosting)
-
+Backend
+Runtime: Node.js & Express.js
+Database: PostgreSQL (Hosted on Neon)
+ORM: Prisma
+Bitcoin Data: CoinGecko API (Price), Mempool.space API (On-Chain Data)
+Email Service: Nodemailer (SMTP)
+Frontend
+UI: Semantic HTML5, CSS Grid, Vanilla JavaScript
+Charts: Chart.js
+DevOps
+Deployment: Render
+Version Control: Git & GitHub
 ⚙️ Local Installation & Setup
-If you want to run this project locally on your machine, follow these steps:
+Follow these steps to run the project locally on your machine.
 
-1. Prerequisites
-
-Node.js installed on your machine.
-
-A PostgreSQL database (local or cloud-based like Neon).
-
-A Google Cloud Console account (for OAuth credentials).
-
-A Gmail account with an "App Password" generated (for Nodemailer).
-
-2. Clone the Repository
-git clone https://github.com/synergy-mp/FJ-BE-R2-Mayank-NITDelhi
-cd FJ-BE-R2-Mayank-NITDelhi
-
-3. Install Dependencies
+1. Clone the Repository
+Bash
+git clone https://github.com/your-username/your-repo-name.git
+cd your-repo-name
+2. Install Dependencies
+Bash
 npm install
-
-4. Environment Variables
-
+3. Configure Environment Variables
 Create a .env file in the root directory and add the following keys:
-# Database
-DATABASE_URL="your_postgresql_connection_string"
 
-# Google OAuth 2.0
-GOOGLE_CLIENT_ID="857189309964-su3rc2r3t65tbtcd3gog9bnco65kf8n4.apps.googleusercontent.com"
-GOOGLE_CLIENT_SECRET="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"
-SESSION_SECRET="fischer_jordan_finance_tracker_secret_2026"
+Code snippet
+# Database Connection (PostgreSQL)
+DATABASE_URL="postgresql://user:password@host:port/database"
 
-# Nodemailer (Gmail)
-EMAIL_USER="mayankprakas@gmail.com"
-EMAIL_PASS=" dm me to get access"
+# Google OAuth 2.0 Credentials
+GOOGLE_CLIENT_ID="your_google_client_id"
+GOOGLE_CLIENT_SECRET="your_google_client_secret"
+SESSION_SECRET="your_random_secret_string"
 
-5. Database Setup (Prisma)
+# Nodemailer (Gmail App Password)
+EMAIL_USER="your_email@gmail.com"
+EMAIL_PASS="your_16_char_app_password"
+4. Initialize Database
+Push the Prisma schema to your database:
 
-Push the schema to your database and generate the Prisma client:
+Bash
 npx prisma db push
 npx prisma generate
-
-6. Start the Server
+5. Run the Server
+Bash
 node server.js
+Visit http://localhost:3000 in your browser.
 
-📂 Folder Structure Highlights
-server.js: The core Express backend, containing all API routes, OAuth logic, and Nodemailer configurations.
-
-index.html: The single-page frontend application housing the UI, form logic, and Chart.js implementations.
-
-prisma/schema.prisma: The database schema defining Users, Transactions, Categories, and Budgets.
-
-uploads/: Auto-generated directory storing user-uploaded receipts.
+📡 API Integrations
+This project relies on the following public APIs:
+CoinGecko API: Used to fetch the live bitcoin price in usd, inr, and eur.
+Mempool.space API: Used to fetch chain_stats and mempool_stats for public Bitcoin addresses.
 
 👨‍💻 Author
-Mayank
-
+Mayank Prakash  
+Role: Full Stack Developer & Bitcoin Enthusiast
 GitHub: https://github.com/synergy-mp
-
 LinkedIn: https://www.linkedin.com/in/mayank-prakash-1a2737323/
-
+📝 License
+This project is open-source and available under the MIT License.

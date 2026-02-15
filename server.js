@@ -9,53 +9,52 @@ const session = require("express-session");
 const passport = require("passport");
 const GoogleStrategy = require("passport-google-oauth20").Strategy;
 const nodemailer = require("nodemailer");
-const axios = require("axios"); // CRITICAL: For fetching Bitcoin data
+const axios = require("axios"); 
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 const prisma = new PrismaClient();
 
-// Force IPv4 for Render
+// Force IPv4 for Render (Fixes email errors)
 const dns = require("dns");
 dns.setDefaultResultOrder("ipv4first");
 
 app.use(cors());
 app.use(express.json());
 
-// --- BITCOIN & EXCHANGE RATE LOGIC ---
-// We start with defaults, but these will update live
+// --- BITCOIN PRICE LOGIC ---
 let EXCHANGE_RATES = { 
   USD: 1.0, 
   INR: 83.0, 
   EUR: 0.92, 
-  SATS: 0.0000002 // Placeholder: 1 Sat in USD
+  SATS: 0.0000002 // Default fallback
 };
 
-// Function to fetch live Bitcoin price
+let CURRENT_BTC_PRICE = 20000; // Default fallback
+
 async function updateExchangeRates() {
   try {
     const res = await axios.get('https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd,inr,eur');
     const btcPrice = res.data.bitcoin;
     
-    // 1 Bitcoin = 100,000,000 Sats
-    // So 1 Sat = Price / 100,000,000
-    EXCHANGE_RATES.INR = 83.0; // Fallback or fetch live fiat rates if needed
+    CURRENT_BTC_PRICE = btcPrice.usd;
+    EXCHANGE_RATES.INR = 83.0; // In a real app, fetch this too
     EXCHANGE_RATES.EUR = 0.92;
     EXCHANGE_RATES.SATS = btcPrice.usd / 100000000; 
 
-    console.log(`✅ Bitcoin Price Updated: $${btcPrice.usd} USD | 1 Sat = $${EXCHANGE_RATES.SATS}`);
+    console.log(`✅ Bitcoin Price Updated: $${CURRENT_BTC_PRICE}`);
   } catch (error) {
     console.error("❌ Failed to fetch Bitcoin price:", error.message);
   }
 }
 
-// Update prices every 10 minutes
+// Update immediately and then every 10 minutes
 updateExchangeRates();
 setInterval(updateExchangeRates, 600000);
 
 function convertCurrency(amount, fromCurrency, toCurrency) {
   if (fromCurrency === toCurrency) return amount;
-  // Convert to Base USD first
+  
   let amountInUSD;
   if (fromCurrency === "SATS") {
     amountInUSD = amount * EXCHANGE_RATES.SATS;
@@ -63,7 +62,6 @@ function convertCurrency(amount, fromCurrency, toCurrency) {
     amountInUSD = amount / (EXCHANGE_RATES[fromCurrency] || 1);
   }
 
-  // Convert USD to Target
   if (toCurrency === "SATS") {
     return amountInUSD / EXCHANGE_RATES.SATS;
   }
@@ -75,13 +73,11 @@ app.get("/", (req, res) => {
   res.sendFile(path.join(__dirname, "index.html"));
 });
 
-// --- FOLDER & MULTER SETUP ---
 const uploadDir = path.join(__dirname, "uploads");
 if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir);
 app.use("/uploads", express.static(uploadDir));
 const upload = multer({ dest: "uploads/" });
 
-// --- SESSION & PASSPORT ---
 app.use(session({
   secret: process.env.SESSION_SECRET || "secret",
   resave: false, saveUninitialized: false
@@ -114,33 +110,27 @@ passport.deserializeUser(async (id, done) => {
   done(null, user);
 });
 
-// --- EMAIL TRANSPORTER ---
 const transporter = nodemailer.createTransport({
   host: "smtp.gmail.com", port: 465, secure: true,
   auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS }
 });
 
-// --- BITCOIN SPECIFIC ENDPOINT ---
-// Fetches real on-chain balance for a Bitcoin address
+// --- NEW PUBLIC TICKER ENDPOINT ---
+app.get("/api/ticker", (req, res) => {
+    res.json({ price: CURRENT_BTC_PRICE });
+});
+
 app.get("/api/bitcoin-balance/:address", async (req, res) => {
   try {
-    // Using Mempool.space API - The gold standard for Bitcoin data
     const response = await axios.get(`https://mempool.space/api/address/${req.params.address}`);
     const chainStats = response.data.chain_stats;
     const mempoolStats = response.data.mempool_stats;
-    
-    // Balance = (Funded - Spent)
     const satBalance = (chainStats.funded_txo_sum - chainStats.spent_txo_sum) + 
                        (mempoolStats.funded_txo_sum - mempoolStats.spent_txo_sum);
-    
     res.json({ sats: satBalance, usd_value: satBalance * EXCHANGE_RATES.SATS });
-  } catch (error) {
-    res.status(500).json({ error: "Invalid Address or Network Error" });
-  }
+  } catch (error) { res.status(500).json({ error: "Invalid Address" }); }
 });
 
-// --- STANDARD ROUTES ---
-app.post("/login", async (req, res) => { /* ... (Keep standard login logic) ... */ });
 app.get('/auth/google', passport.authenticate('google', { scope: ['profile', 'email'] }));
 app.get('/auth/google/callback', passport.authenticate('google', { failureRedirect: '/' }), (req, res) => {
     res.redirect(`/?userId=${req.user.id}`);
@@ -168,13 +158,11 @@ app.post("/transactions", upload.single("receipt"), async (req, res) => {
       }
     });
 
-    // Check Budget (Simplified for brevity)
     if (type === "EXPENSE") {
         const budget = await prisma.budget.findFirst({ where: { userId: uId, categoryId: catRecord.id }, include: { user: true } });
         if (budget) {
-            // Convert everything to USD for comparison
             const spentUSD = convertCurrency(parseFloat(amount), currency, "USD");
-            const limitUSD = convertCurrency(parseFloat(budget.limit), "USD", "USD"); // Assuming limit is stored in USD base
+            const limitUSD = convertCurrency(parseFloat(budget.limit), "USD", "USD");
             if (spentUSD > limitUSD) {
                 await transporter.sendMail({
                     from: process.env.EMAIL_USER, to: budget.user.email,
@@ -197,10 +185,10 @@ app.get("/dashboard/:userId", async (req, res) => {
       const amt = convertCurrency(parseFloat(t.amount), t.currency, displayCurrency);
       if (t.type === "INCOME") income += amt; else expense += amt;
     });
-    res.json({ income, expense, currency: displayCurrency, btc_price: (1/EXCHANGE_RATES.SATS) * 100000000 }); // Send live price too
+    res.json({ income, expense, currency: displayCurrency, btc_price: CURRENT_BTC_PRICE });
   } catch (e) { res.status(500).json({ error: "Error" }); }
 });
 
-// ... (Keep your Budgets/Reports routes exactly as they were) ...
+// ... Keep existing budgets/reports endpoints ...
 
 app.listen(PORT, () => console.log(`🚀 Satoshi Tracker running on port ${PORT}`));

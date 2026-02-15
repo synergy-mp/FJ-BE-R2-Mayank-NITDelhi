@@ -6,7 +6,7 @@ SatoshiTrack is not just a finance tracker; it is a Bitcoin-native portfolio man
 Built with Node.js, PostgreSQL, and Prisma, this project demonstrates integration with the Bitcoin ecosystem via real-time blockchain APIs.
 
 🚀 Live Demo
-[Insert Your Render Link Here]
+https://fj-be-r2-mayank-nitdelhi.onrender.com
 (Note: Please allow ~30 seconds for the initial load as the free instance spins up.)
 
 ₿ Summer of Bitcoin Features
